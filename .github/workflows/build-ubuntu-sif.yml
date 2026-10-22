@@ -1,0 +1,48 @@
+name: Build Ubuntu SIF for HPC
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Install Apptainer on the GitHub runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y software-properties-common
+          sudo add-apt-repository --yes ppa:apptainer/ppa
+          sudo apt-get update
+          sudo apt-get install -y apptainer
+          apptainer --version
+
+      - name: Build and test a conventional gzip-compressed SIF
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apptainer build --mksquashfs-args '-comp gzip' ubuntu22.04.sif docker://ubuntu:22.04
+          apptainer exec --cleanenv ubuntu22.04.sif cat /etc/os-release
+          apptainer exec --cleanenv ubuntu22.04.sif /usr/bin/ldd --version
+          apptainer inspect --json ubuntu22.04.sif > image-inspect.json
+          sha256sum ubuntu22.04.sif > SHA256SUMS
+          printf '%s\n' "Ubuntu 22.04 base container; no Python, PyTorch, CUDA or RFD4 installed." > IMAGE-INFO.txt
+          printf 'Build UTC: %s\n' "$(date -u +%FT%TZ)" >> IMAGE-INFO.txt
+          apptainer --version >> IMAGE-INFO.txt
+
+      - name: Upload the SIF and checksums
+        uses: actions/upload-artifact@v4
+        with:
+          name: ubuntu22.04-sif
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            ubuntu22.04.sif
+            SHA256SUMS
+            image-inspect.json
+            IMAGE-INFO.txt
