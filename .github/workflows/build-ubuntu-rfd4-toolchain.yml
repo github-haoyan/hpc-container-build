@@ -1,0 +1,110 @@
+name: Build Ubuntu RFD4 toolchain SIF
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - name: Install Apptainer
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y software-properties-common
+          sudo add-apt-repository --yes ppa:apptainer/ppa
+          sudo apt-get update
+          sudo apt-get install -y apptainer
+          apptainer --version
+
+      - name: Define and build the runtime image
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > ubuntu22.04-rfd4-toolchain.def <<'DEF'
+          Bootstrap: docker
+          From: ubuntu:22.04
+
+          %post
+              set -eu
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                  build-essential ca-certificates git curl \
+                  libxrender1 libx11-6 libxext6 \
+                  cmake ninja-build pkg-config \
+                  wget unzip xz-utils zstd file time procps
+              mkdir -p /opt/rfd4-build-info
+              dpkg-query -W > /opt/rfd4-build-info/system-packages.tsv
+              rm -rf /var/lib/apt/lists/*
+
+          %environment
+              export CC=/usr/bin/gcc
+              export CXX=/usr/bin/g++
+              export PYTHONNOUSERSITE=1
+              export TMOL_DISABLE_WHEEL_FETCH=1
+              export TMOL_JIT_FALLBACK=0
+              export TMOL_USE_JIT=0
+
+          %labels
+              Purpose RFD4-Proteina-native-runtime-toolchain
+              Reference RosettaCommons/RFD4-Proteina-aaccdd2
+          DEF
+          sudo apptainer build --mksquashfs-args '-comp gzip' \
+            ubuntu22.04-rfd4-toolchain.sif ubuntu22.04-rfd4-toolchain.def
+
+      - name: Verify compilers and system libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+          apptainer exec --cleanenv ubuntu22.04-rfd4-toolchain.sif /bin/sh -ec '
+            gcc --version
+            g++ --version
+            make --version
+            git --version
+            cmake --version
+            ninja --version
+            pkg-config --version
+            ldd --version
+            test -e /usr/lib/x86_64-linux-gnu/libXrender.so.1
+            test -e /usr/lib/x86_64-linux-gnu/libX11.so.6
+            test -e /usr/lib/x86_64-linux-gnu/libXext.so.6
+            work=$(mktemp -d)
+            trap '\''rm -rf -- "$work"'\'' EXIT
+            printf "%s\n" "int main(void) { return 0; }" > "$work/test.c"
+            gcc "$work/test.c" -o "$work/test-c"
+            "$work/test-c"
+            printf "%s\n" "#include <vector>" "int main() { std::vector<int> x(3); return x.size() != 3; }" > "$work/test.cpp"
+            g++ "$work/test.cpp" -o "$work/test-cpp"
+            "$work/test-cpp"
+          '
+          apptainer inspect --json ubuntu22.04-rfd4-toolchain.sif > image-inspect.json
+          apptainer exec --cleanenv ubuntu22.04-rfd4-toolchain.sif \
+            cat /opt/rfd4-build-info/system-packages.tsv > system-packages.tsv
+          sha256sum ubuntu22.04-rfd4-toolchain.sif > SHA256SUMS
+          printf '%s\n' \
+            'Ubuntu 22.04 with GCC, G++, Make, Git, curl, CA certificates and Open Babel system library dependencies.' \
+            'Reuses the existing external Conda environment and model weights.' \
+            'Not the official full RFD4 application image; no Python, PyTorch, model, or CUDA Toolkit bundled.' \
+            'GitHub runner checks C/C++ compilation; GPU/Triton validation must run on the allocated GPU node.' > IMAGE-INFO.txt
+          printf 'Build UTC: %s\n' "$(date -u +%FT%TZ)" >> IMAGE-INFO.txt
+          apptainer --version >> IMAGE-INFO.txt
+
+      - name: Upload image and build records
+        uses: actions/upload-artifact@v4
+        with:
+          name: ubuntu22.04-rfd4-toolchain
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            ubuntu22.04-rfd4-toolchain.sif
+            ubuntu22.04-rfd4-toolchain.def
+            SHA256SUMS
+            image-inspect.json
+            IMAGE-INFO.txt
+            system-packages.tsv
